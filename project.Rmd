@@ -1,0 +1,291 @@
+---
+title: "final"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r}
+################################################################
+# Topic: STOR 320/520 Group Project - Final Presentation/Paper
+# Purpose: Answer Q4: What is the relationship between
+#                     cumulative Covid-19 vaccination number and
+#                     cumulative number of Covid-19 cases detected
+#                     for EU countries?
+# Output: 5 tables, 2 figures
+# Created By: Yuhan Wang
+# Date Created: December 01, 2021
+# Date Last Modified: December 02, 2021
+################################################################
+
+################################################################
+
+## covid data input
+
+library(tidyverse)
+library(dplyr)
+library(gridExtra)
+library(kableExtra)
+library(broom)
+library(modelr) # for crossv_kfold()
+library(scales) # for trans_new()
+
+covid = read_csv("covid.csv")
+
+# obtain cumulative vaccination and cumulative cases detected
+covid = covid[,c(1:6,25:31)]
+covid$FirstDose = rowSums(covid[,7:13], na.rm=TRUE)
+covid = covid %>%
+  select (-7:-13) %>% 
+  group_by(country) %>%
+  mutate(FirstDose_cumsum = cumsum(FirstDose)) %>%
+  mutate(new_cases_cumsum = cumsum(new_cases))
+
+# our data for vaccination start from 2020 week 53, so remove data before that
+covid = covid %>% 
+  filter(week_id >= 14)
+
+# add log_FirstDose_cumsum variable
+covid = covid %>%
+  mutate(log_FirstDose_cumsum = log(FirstDose_cumsum + 2000000))
+
+################################################################
+
+## 5 model fitting functions
+
+# function: linear model 1: y ~ x
+train.lm1.func = function(data) {
+  lm = lm(new_cases_cumsum ~ FirstDose_cumsum, data=data)
+  return(lm)
+}
+
+# function: linear model 2: y ~ x + x^2
+train.lm2.func = function(data) {
+  lm = lm(new_cases_cumsum ~ poly(FirstDose_cumsum, 2), data=data)
+  return(lm)
+}
+
+# function: linear model 3: y ~ x + x^2 + x^3
+train.lm3.func = function(data) {
+  lm = lm(new_cases_cumsum ~ poly(FirstDose_cumsum, 3), data=data)
+  return(lm)
+}
+
+# function: linear model 4: y ~ x + x^2 + x^3 + x^4
+train.lm4.func = function(data) {
+  lm = lm(new_cases_cumsum ~ poly(FirstDose_cumsum, 4), data=data)
+  return(lm)
+}
+
+# function: linear model 5: y ~ log(x + 2000000)
+train.lm5.func = function(data) {
+  lm = lm(new_cases_cumsum ~ log_FirstDose_cumsum, data=data)
+  return(lm)
+}
+
+################################################################
+
+## function: cross validation by model
+
+cv_by_model.func = function(model.func.name) {
+  set.seed(73268)
+  cv = covid %>%
+    crossv_kfold(k = 5) %>% #5 folds instead of 10 due to not very large sample size
+    mutate(train.model = map(train, model.func.name)) %>%
+    mutate(predict = map2(test, train.model, ~augment(.y, newdata=.x))) %>%
+    select(predict)
+  return(cv)
+}
+
+################################################################
+
+## MB, MAE, RMSE, adjusted R^2 calculation function
+
+# function: calculate mean bias by cross validation prediction results
+mb_by_cv.func=function(cv) {
+  cv = cv %>% unnest(cols = c(predict))
+  res = cv$.resid
+  bias = mean(res, na.rm = TRUE)
+  return(bias)
+}
+
+# function: calculate mean absolute error by cross validation prediction results
+mae_by_cv.func = function(cv) {
+  cv = cv %>% unnest(cols=c(predict))
+  res = cv$.resid
+  mae = mean(abs(res), na.rm = TRUE)
+  return(mae)
+}
+
+# function: calculate root mean squared error by cross validation prediction results
+rmse_by_cv.func = function(cv) {
+  cv = cv %>% unnest(cols=c(predict))
+  res = cv$.resid
+  mse = mean(res^2, na.rm = TRUE)
+  rmse = sqrt(mse)
+  return(rmse)
+}
+
+# function: calculate adjusted R^2
+adjR2.func = function(y, res, n, p) {
+  #n = sample size
+  #p = number of independent variables
+  R2 = 1 - sum(res^2)/sum((y-mean(y))^2)
+  adjR2 = 1 - (1-R2)*(n-1)/(n-p-1)
+  return(adjR2)
+}
+
+# function: calculate adjusted R^2 by cross validation prediction results
+adjR2_by_cv.func = function(cv, p) {
+  adjR2 = vector(mode="double", length=5)
+  for (i in 1:5) {
+    adjR2[i] = adjR2.func(y = cv[[1]][[i]]$new_cases_cumsum,
+                          res = cv[[1]][[i]]$.resid,
+                          n = 510/5, #510 observations, 5 folds
+                          p = p)
+  }
+  adjR2 = mean(adjR2)
+  return(adjR2)
+}
+
+################################################################
+
+## cross validation and error/adjusted R2 calculation all 5 models
+
+cv_by_lm1 = cv_by_model.func(train.lm1.func)
+cv_by_lm2 = cv_by_model.func(train.lm2.func)
+cv_by_lm3 = cv_by_model.func(train.lm3.func)
+cv_by_lm4 = cv_by_model.func(train.lm4.func)
+cv_by_lm5 = cv_by_model.func(train.lm5.func)
+
+Model = c("Model 1: y ~ x",
+          "Model 2: y ~ x + x^2",
+          "Model 3: y ~ x + x^2 + x^3",
+          "Model 4: y ~ x + x^2 + x^3 + x^4",
+          "Model 5: y ~ log(x + 2000000)")
+
+MB = c(mb_by_cv.func(cv_by_lm1),
+       mb_by_cv.func(cv_by_lm2),
+       mb_by_cv.func(cv_by_lm3),
+       mb_by_cv.func(cv_by_lm4),
+       mb_by_cv.func(cv_by_lm5))
+
+MAE = c(mae_by_cv.func(cv_by_lm1),
+        mae_by_cv.func(cv_by_lm2),
+        mae_by_cv.func(cv_by_lm3),
+        mae_by_cv.func(cv_by_lm4),
+        mae_by_cv.func(cv_by_lm5))
+
+RMSE = c(rmse_by_cv.func(cv_by_lm1),
+         rmse_by_cv.func(cv_by_lm2),
+         rmse_by_cv.func(cv_by_lm3),
+         rmse_by_cv.func(cv_by_lm4),
+         rmse_by_cv.func(cv_by_lm5))
+
+adjR2 = c(adjR2_by_cv.func(cv_by_lm1, 1),
+          adjR2_by_cv.func(cv_by_lm2, 2),
+          adjR2_by_cv.func(cv_by_lm3, 3),
+          adjR2_by_cv.func(cv_by_lm4, 4),
+          adjR2_by_cv.func(cv_by_lm5, 1))
+
+################################################################
+
+## create a summarizing table for all 5 models
+
+summarize_table = data.frame(Model, MB, MAE, RMSE, adjR2)
+
+colnames(summarize_table)[1] = ""
+
+summarize_table %>%
+  kbl(digits = c(NA,1,1,1,4)) %>%
+  kable_classic()
+
+################################################################
+
+## CHOOSE WHICH MODEL (model 2/model 5) ???????, OR RETAIN BOTH
+
+# When the results are close, choose the simplest model
+
+################################################################
+
+### IF CHOOSE MODEL 2
+## Conclusion: choose model 2: y ~ x + x^2
+
+# fitted model 2: y = 1.728951e+05 + 5.869230e-01*x - 2.398962e-08*x^2 + e
+lm2 = lm(new_cases_cumsum ~ poly(FirstDose_cumsum, 2, raw = TRUE), data = covid)
+  #or use FirstDose_cumsum + I(FirstDose_cumsum^2)
+as.data.frame(tidy(lm2))
+as.data.frame(glance(lm2))
+
+# Figure: data points and the fitted model 2
+covid %>%
+  ggplot(aes(x = FirstDose_cumsum, y = new_cases_cumsum)) +
+    geom_point(aes(color = country), alpha = 0.6, shape = 16) +
+    geom_smooth(method = lm, formula = y ~ poly(x, 2), size = 0.5, color = "black") +
+    theme_minimal() +
+    theme(axis.line = element_line(),
+          axis.ticks = element_line(),
+          plot.title = element_text(hjust = 0.5),
+          legend.title = element_blank(),
+          legend.title.align=0.5) +
+    scale_x_continuous(name = "Cumulative Vaccinations (in million)",
+                       labels = function(x) x/1000000) +
+    scale_y_continuous(name = "Cumulative Cases Detected (in million)",
+                       labels = function(x) x/1000000) +
+    ggtitle("Cumulative Vaccination Number vs.\nCumulative Number Of Cases Detected\nFor EU Countries\n(Fitted By Model 2)")
+
+################################################################
+
+### IF CHOOSE MODEL 5
+## Conclusion: choose model 5: y ~ log(x + 2000000)
+
+# fitted model 5: y = - 25844843 + 1788825*log(x + 2000000) + e
+lm5 = lm(new_cases_cumsum ~ log_FirstDose_cumsum, data = covid)
+as.data.frame(tidy(lm5))
+as.data.frame(glance(lm5))
+
+# Figure: data points and the fitted model 5
+lm5_predict = cbind(covid, as.data.frame(predict(lm5, interval="confidence")))
+breaks.func = function(transformed_breaks) log(transformed_breaks + 2000000)
+lm5_predict %>%
+  ggplot(aes(x = log_FirstDose_cumsum, y = new_cases_cumsum)) +
+    geom_point(aes(color = country), alpha = 0.6, shape = 16) +
+    geom_line(aes(y = fit)) +
+    geom_ribbon(aes(y = fit, ymin = lwr, ymax = upr), alpha = 0.3) +
+    theme_minimal() +
+    theme(axis.line = element_line(),
+          axis.ticks = element_line(),
+          plot.title = element_text(hjust = 0.5),
+          legend.title = element_blank(),
+          legend.title.align = 0.5) +
+    scale_x_continuous(name = "Cumulative Vaccinations (in million)",
+                       trans = trans_new(name = "exp",
+                                         transform = function(x) exp(x)-2000000,
+                                         inverse = function(x) log(x+2000000)),
+                       breaks = breaks.func(c(0,5,10,15,20)*1000000),
+                       labels = function(x) round((exp(x)-2000000)/1000000, 0)) +
+    scale_y_continuous(name = "Cumulative Cases Detected (in million)",
+                       labels = function(x) x/1000000) +
+    ggtitle("Cumulative Vaccination Number vs.\nCumulative Number Of Cases Detected\nFor EU Countries\n(Fitted By Model 5)")
+
+################################################################
+
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
